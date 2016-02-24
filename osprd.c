@@ -43,12 +43,12 @@
 	* as an argument to insmod: "insmod osprd.ko nsectors=4096" */
 	static int nsectors = 32;
 	module_param(nsectors, int, 0);
-
+	
 	struct process_list{
-		pid_t pid; 
+		pid_t pid;
 		struct process_list* next;
-	}; 
-	typedef struct process_list* pid_list; 
+	};
+	typedef struct process_list* pid_list;
 	
 	/* The internal representation of our device. */
 	typedef struct osprd_info {
@@ -119,13 +119,13 @@
 	*/
 	static void osprd_process_request(osprd_info_t *d, struct request *req)
 	{
-	void *start_offset;  
-	int total_size; 
-	unsigned int cmd; 
-		if (!blk_fs_request(req)) {
-			end_request(req, 0);
-			return;
-		}
+	void *start_offset;
+	int total_size;
+	unsigned int cmd;
+	if (!blk_fs_request(req)) {
+	end_request(req, 0);
+	return;
+	}
 	
 	// EXERCISE: Perform the read or write request by copying data between
 	// our data array and the request's buffer.
@@ -144,19 +144,19 @@
 	cmd = rq_data_dir(req);
 	if(cmd == READ)
 	{
-	memcpy(req->buffer, start_offset, total_size);
+		memcpy(req->buffer, start_offset, total_size);
 	}
 	else if(cmd == WRITE)
 	{
-	memcpy(start_offset, req->buffer, total_size);
+		memcpy(start_offset, req->buffer, total_size);
 	}
 	else
 	{
-	eprintk("Incorrect command. . . \n");
-	end_request(req, 0);
+		eprintk("Incorrect command. . . \n");
+		end_request(req, 0);
 	}
 	
-	eprintk("Should process request...\n");
+	//eprintk("Should process request...\n");
 	
 	end_request(req, 1);
 	}
@@ -191,7 +191,7 @@
 		if(filp_writable != 0) // writeable
 		{
 			d->write_locking_pid = -1;
-			d->total_write_locks -= 1;
+			d->total_write_locks = 0;
 		}
 		else
 		{
@@ -206,26 +206,37 @@
 					tail = head;
 					head = head->next;
 				}
-				else
+				else	// found a matchpid_list read_locking_pids;
 				{
-					if(tail == NULL) // found a matchpid_list read_locking_pids;
+					if(tail == NULL)
 					//pid_t write_locking_pid;
 					{
-						head = head->next;
+						tail = head;
+						if (head->next == NULL) {
+							kfree(tail);
+							head = NULL;
+						}
+						else {
+							kfree(tail);
+							head = head->next;
+						}
+						d->read_locking_pids = head;
 						break;
 					}
 					else // essentially gets rid of the linked list item
 					{
 						tail->next = head->next;
+						kfree(head);
 						break;
 					}
 				}
 			}
 		}
-		wake_up_all(&(d->blockq));
+	//wake_up_all(&(d->blockq));
 	}
 	
 	osp_spin_unlock(&(d->mutex));
+	wake_up_all(&(d->blockq)); //new 
 	
 	
 	// Your code here.
@@ -253,11 +264,11 @@
 	osprd_info_t *d = file2osprd(filp); // device info
 	int r = 0; // return value: initially 0
 	
-	//my code 
-	unsigned curr_ticket; 
+	//my code
+	unsigned curr_ticket;
 	int wait;
-	pid_list cur; 
-	pid_list prev; 
+	pid_list curr;
+	pid_list prev;
 	// is file open for writing?
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
 	
@@ -305,102 +316,88 @@
 	
 	// Your code here (instead of the next two lines).
 	/*if(!d)
-		return -1; 
-	osp_spin_lock(&d->mutex); */
+	return -1;*/
+	//osp_spin_lock(&d->mutex); 
 	if (current->pid == d->write_locking_pid) {
-		osp_spin_unlock(&d->mutex);
-		return -EDEADLK; 
+		//osp_spin_unlock(&d->mutex); changed
+		return -EDEADLK;
 	}
 	
+	curr = d->read_locking_pids;
+	
+	while(curr != NULL) {
+		if (curr->pid == current->pid) {
+			return -EDEADLK;
+		}
+		else {
+			prev = curr;
+			curr = curr->next;
+		}
+	}
+
 	osp_spin_lock(&d->mutex); 
-	curr_ticket = d->ticket_head; 
+	curr_ticket = d->ticket_head;
 	d->ticket_head++;
-	osp_spin_unlock(&d->mutex); 
-
+	osp_spin_unlock(&d->mutex);
+	
 	if(filp_writable) {
-		pid_list curr = d->read_locking_pids; 
-		pid_list prev = NULL; 
-
-		while(curr != NULL) {
-			if (curr->pid == current->pid) { 
-				//osp_spin_unlock(&d->mutex); 
-				return -EDEADLK; 
-			}
-			else { 
-				prev = curr; 
-				curr = curr->next;
-			}
+	
+	wait = wait_event_interruptible(d->blockq, d->ticket_tail == curr_ticket && d->total_read_locks ==0 && d->total_write_locks == 0);
+	if(wait == -ERESTARTSYS) {
+		if(curr_ticket == d->ticket_tail) {
+			d->ticket_tail++;
+			wake_up_all(&d->blockq);
 		}
-		/*while(d->total_write_locks != 0 || d->total_read_locks > 0 || curr_ticket != d->ticket_tail) { 
-			int wait = wait_event_interruptible(d->blockq, 1); 
-			osp_spin_unlock(&d->mutex); 
-			if(wait == -ERESTARTSYS)
-				return -ERESTARTSYS; 
-			schedule(); 
-			osp_spin_lock(&d->mutex); 
-		}*/
-		osp_spin_unlock(&d->mutex); 
-		wait = wait_event_interruptible(d->blockq, d->ticket_tail == curr_ticket && d->total_read_locks ==0 && d->total_write_locks == 0); 
-		if(wait == -ERESTARTSYS) {
-			if(curr_ticket == d->ticket_tail)
-				d->ticket_tail++; 
-			else 
-				d->ticket_tail--; 
-			osp_spin_lock(&d->mutex); 
-			schedule(); 			
-			return wait; 
-		}
-		osp_spin_lock(&d->mutex); 
-		filp->f_flags |= F_OSPRD_LOCKED; 
-		d->total_write_locks = 1; 
-		d->write_locking_pid = current->pid; 
+		else
+			d->ticket_head--; //changed to head instead of tail
+		//osp_spin_unlock(&d->mutex); //changed to unlock       change based on the above unlock
+		//schedule(); //not sure if needed
+		return wait;
+	}
+	osp_spin_lock(&d->mutex); 
+	filp->f_flags |= F_OSPRD_LOCKED;
+	d->total_write_locks = 1;
+	d->write_locking_pid = current->pid;
 	}
 	else {
-		/*while(d->total_read_locks > 0 || curr_ticket != d->ticket_tail) {
-			wait = wait_event_interruptible(d->blockq, 1); 
-			osp_spin_unlock(&d->mutex); 
-			if(wait == -ERESTARTSYS)
-				return -ERESTARTSYS; 
-			schedule(); 
-			osp_spin_lock(&d->mutex); 
-		}*/
-		osp_spin_unlock(&d->mutex); 
-		wait = wait_event_interruptible(d->blockq, d->total_read_locks == 0 && curr_ticket == d->ticket_tail); 
+		wait = wait_event_interruptible(d->blockq, d->total_write_locks == 0 && curr_ticket == d->ticket_tail);
 		if(wait == -ERESTARTSYS) {
-			if(curr_ticket == d->ticket_tail) 
-				d->ticket_tail++; 
-			else 
-				d->ticket_tail--; 
-			osp_spin_unlock(&d->mutex); 
-			return wait; 
+			if(curr_ticket == d->ticket_tail) {
+				d->ticket_tail++;
+				wake_up_all(&d->blockq);
+			}
+			else
+				d->ticket_head--; //changed to head 
+			//osp_spin_unlock(&d->mutex);               //changed based on above unlock
+			//schedule(); //not sure if needed
+			return wait;
 		}
-		osp_spin_lock(&d->mutex); 
+		osp_spin_lock(&d->mutex);  
 		filp->f_flags |= F_OSPRD_LOCKED;
-		d->total_read_locks++; 
-		
-		cur = d->read_locking_pids; 
-		prev = NULL; 
-		while(cur != NULL) { 
-			prev = cur; 
-			cur = cur->next; 
-		} 
-		if(prev == NULL) {
-			d->read_locking_pids = kmalloc(sizeof(pid_list), GFP_ATOMIC); 
-			d->read_locking_pids->pid = current->pid; 
-			d->read_locking_pids->next = NULL; 
+		d->total_read_locks++;
+	
+		curr = d->read_locking_pids;
+		prev = NULL;
+		while(curr != NULL) {
+			prev = curr;
+			curr = curr->next;
 		}
-		else { 
-			prev->next = kmalloc(sizeof(pid_list), GFP_ATOMIC); 
-			prev->next->next = NULL; 
-			prev->next->pid = current->pid; 
+		if(prev == NULL) {
+			d->read_locking_pids = kzalloc(sizeof(struct process_list), GFP_ATOMIC);
+			d->read_locking_pids->pid = current->pid;
+			d->read_locking_pids->next = NULL;
+		}
+		else {
+			curr = kzalloc(sizeof(struct process_list), GFP_ATOMIC);
+			curr->next = NULL;
+			curr->pid = current->pid;
+			prev->next = curr;
 		}
 	}
-	d->ticket_tail++; 
-	osp_spin_unlock(&d->mutex); 
- 
-	//eprintk("Attempting to acquire\n");
-	//r = -ENOTTY;
+	d->ticket_tail++;
+	osp_spin_unlock(&d->mutex);
 	
+	return 0;	
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 	
 	// EXERCISE: ATTEMPT to lock the ramdisk.
@@ -412,65 +409,65 @@
 	
 	// Your code here (instead of the next two lines).
 	/*if(!d) {
-		return -1;
+	return -1;
 	}
 	*/
-
-	if(filp_writable) {                           //write lock situation 
-		//osp_spin_lock(&d->mutex); 
-		if(d->total_write_locks == 1 || d->total_read_locks > 0 || d->ticket_head != d->ticket_head){ 	
-			//osp_spin_unlock(&d->mutex); 	
-			r = -EBUSY; 
+	
+	if(filp_writable) { //write lock situation
+		osp_spin_lock(&d->mutex);  //changed 
+		if(d->total_write_locks == 1 || d->total_read_locks > 0 || d->ticket_head != d->ticket_head){
+			//osp_spin_unlock(&d->mutex);  
+			r = -EBUSY;
 		}
 		else {
 			if(d->write_locking_pid == current->pid){
-				//osp_spin_unlock(&d->mutex); 
-				return -EDEADLK; 
+			osp_spin_unlock(&d->mutex);  //changed
+				return -EDEADLK;
 			}
 			else {
-				osp_spin_lock(&d->mutex); 
-				filp->f_flags |= F_OSPRD_LOCKED; 
-				d->total_write_locks = 1; 
-				d->write_locking_pid = current->pid; 
-			} 
+				//osp_spin_lock(&d->mutex);  changed, should already be locked 
+				filp->f_flags |= F_OSPRD_LOCKED;
+				d->total_write_locks = 1;
+				d->write_locking_pid = current->pid;
+			}	
 		}
-		//osp_spin_unlock(&d->mutex); 
+		//osp_spin_unlock(&d->mutex);
 	}
 	else {
-		//osp_spin_lock(&d->mutex); 
-		if(d->total_read_locks != 0 || d->ticket_head != d->ticket_tail){
-			//osp_spin_unlock(&d->mutex); 
-			r = -EBUSY; 
-		} 
-		else if(current->pid == d->write_locking_pid) {
-			//osp_spin_unlock(&d->mutex); 
-			return -EDEADLK; 
+	osp_spin_lock(&d->mutex);  //changed
+	if(d->total_read_locks != 0 || d->ticket_head != d->ticket_tail){
+		//osp_spin_unlock(&d->mutex); 
+		r = -EBUSY;
+	}
+	else if(current->pid == d->write_locking_pid) {
+		osp_spin_unlock(&d->mutex); //changed
+		return -EDEADLK;
+	}
+	else {
+		//osp_spin_lock(&d->mutex); changed 
+		filp->f_flags |= F_OSPRD_LOCKED;
+		d->total_read_locks = 1;
+	
+		curr = d->read_locking_pids;
+		prev = NULL;
+		while(curr != NULL){
+			prev = curr;
+			curr = curr->next;
+		}
+		if(prev == NULL) {
+			d->read_locking_pids = kmalloc(sizeof(pid_list), GFP_ATOMIC);
+			d->read_locking_pids->pid = current->pid;
+			d->read_locking_pids->next = NULL;
 		}
 		else {
-			osp_spin_lock(&d->mutex); 
-			filp->f_flags |= F_OSPRD_LOCKED; 
-			d->total_read_locks++;
-
-			cur = d->read_locking_pids; 
-			prev = NULL; 
-			while(cur != NULL){
-				prev = cur; 
-				cur = cur->next; 
-			} 
-			if(prev == NULL) {
-				d->read_locking_pids = kmalloc(sizeof(pid_list), GFP_ATOMIC); 
-			 	d->read_locking_pids->pid = current->pid; 
-				d->read_locking_pids->next = NULL;
-			}
-			else { 
-				prev->next = kmalloc(sizeof(pid_list), GFP_ATOMIC);
-				prev->next->next = NULL; 
-				prev->next->pid = current->pid; 
-			} 
+			prev->next = kmalloc(sizeof(pid_list), GFP_ATOMIC);
+			prev->next->next = NULL;
+			prev->next->pid = current->pid;
 		}
-	} 
-		osp_spin_unlock(&d->mutex);	
- 	
+	}
+	}
+	osp_spin_unlock(&d->mutex);
+	
 	//eprintk("Attempting to try acquire\n");
 	//r = -ENOTTY;
 	
@@ -482,43 +479,60 @@
 	// Otherwise, clear the lock from filp->f_flags, wake up
 	// the wait queue, perform any additional accounting steps
 	// you need, and return 0.
-	
-	// Your code here (instead of the next line).
-	//r = -ENOTTY;
 		if(!d)
-			return -1; 
-		osp_spin_lock(&d->mutex); 
-		if((filp->f_flags & F_OSPRD_LOCKED) == 0)
-			r = -EINVAL; 
-		else { 
-			if(filp_writable) {
-				d->total_write_locks = 0;
-				d->write_locking_pid = -1; 
-				wake_up_all(&d->blockq); 
-			}
-			else {
-				d->total_read_locks--; 
-				prev = NULL; 
-				cur = d->read_locking_pids; 
-				while(cur != NULL) {
-					if(cur->pid == current->pid) {
-						if(prev == NULL) 
-							d->read_locking_pids = cur->next; 
-						else 
-							prev->next = cur->next; 
-						kfree(cur); 
-						break; 
-					}
-					else { 
-						prev = cur; 
-						cur = cur->next; 
-					}
-				} 
-			}
-			filp->f_flags &= !F_OSPRD_LOCKED; 
-		}
-		osp_spin_unlock(&d->mutex); 
+			return -1;
 
+		if((filp->f_flags & F_OSPRD_LOCKED) == 0)
+			return -EINVAL;
+
+		osp_spin_lock(&d->mutex);
+		if(filp_writable) {
+			d->total_write_locks = 0;
+			d->write_locking_pid = -1;
+		}
+		else {
+			d->total_read_locks--;
+			prev = NULL;
+			curr = d->read_locking_pids;
+	
+			while(curr != NULL) // go through linked list
+			{
+				if(curr->pid != current->pid)
+				{
+					prev = curr;
+					curr = curr->next;
+				}
+				else	// found a matchpid_list read_locking_pids;
+				{
+					if(prev == NULL)
+					//pid_t write_locking_pid;
+					{
+						prev = curr;
+						if (curr->next == NULL) {
+							kfree(prev);
+							curr = NULL;
+						}
+						else {
+							kfree(prev);
+							curr = curr->next;
+						}
+						d->read_locking_pids = curr;
+						break;
+					}
+					else // essentially gets rid of the linked list item
+					{
+						prev->next = curr->next;
+						kfree(curr);
+						break;
+					}
+				}
+			}
+		}
+		filp->f_flags |= F_OSPRD_LOCKED;
+		osp_spin_unlock(&d->mutex);
+
+		wake_up_all(&d->blockq);
+	
 	} else
 	r = -ENOTTY; /* unknown command */
 	return r;
@@ -533,9 +547,9 @@
 	init_waitqueue_head(&d->blockq);
 	osp_spin_lock_init(&d->mutex);
 	d->ticket_head = d->ticket_tail = 0;
-	d->total_read_locks = 0; 
-	d->total_write_locks = 0; 
-	d->read_locking_pids = NULL; 
+	d->total_read_locks = 0;
+	d->total_write_locks = 0;
+	d->read_locking_pids = NULL;
 	d->write_locking_pid= -1;
 	
 	/* Add code here if you add fields to osprd_info_t. */
